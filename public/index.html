@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#08111f" />
+  <title>SEMILIR | BRT Detection</title>
+  <style>
+    :root{color-scheme:dark;--bg:#08111f;--panel:#111d2e;--line:#26364b;--muted:#9aabc0;--green:#26d07c;--red:#ff5d68;--blue:#65a9ff}
+    *{box-sizing:border-box}body{margin:0;background:radial-gradient(ellipse at top,#142943 0,#08111f 55%);font-family:Inter,system-ui,Arial,sans-serif;color:#f4f7fb;min-height:100vh}
+    .wrap{width:min(920px,100%);margin:auto;padding:24px 16px 40px}.head{display:flex;align-items:center;justify-content:space-between;margin-bottom:22px}.brand{font-size:25px;font-weight:850;letter-spacing:.16em}.sub{font-size:11px;color:var(--muted);letter-spacing:.18em;margin-top:4px}.pill{border:1px solid var(--line);border-radius:99px;padding:7px 11px;color:var(--muted);font-size:12px}
+    .panel{background:rgba(17,29,46,.92);border:1px solid var(--line);border-radius:20px;padding:16px;box-shadow:0 18px 50px #0005}.stage{position:relative;overflow:hidden;border-radius:14px;background:#020711;aspect-ratio:16/9;display:grid;place-items:center}.stage video{width:100%;height:100%;object-fit:cover;display:none}.stage canvas{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}.empty{color:var(--muted);text-align:center;padding:25px}.empty b{display:block;color:#fff;margin-bottom:8px}.actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:14px}.btn{border:0;border-radius:12px;padding:12px 17px;font-weight:750;cursor:pointer;background:var(--green);color:#062014}.btn.secondary{background:#26364b;color:#f3f6fb}.btn:disabled{opacity:.45;cursor:not-allowed}.status{font-size:13px;color:var(--muted);margin:13px 2px 0;min-height:20px}.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:14px}.result{padding:16px;border-radius:15px;border:1px solid var(--line);background:#0b1727}.result small{color:var(--muted);font-size:11px;letter-spacing:.1em}.result strong{display:block;font-size:clamp(22px,5vw,32px);margin-top:5px}.green{color:var(--green)}.red{color:var(--red)}.meta{color:var(--muted);font-size:12px;margin-top:5px}.foot{color:#8293a8;font-size:11px;line-height:1.5;margin:16px 3px 0}.spinner{display:inline-block;width:10px;height:10px;border:2px solid #789;border-top-color:transparent;border-radius:50%;animation:spin .7s linear infinite;margin-right:7px}@keyframes spin{to{transform:rotate(360deg)}}
+    @media(max-width:560px){.wrap{padding:17px 12px 30px}.panel{padding:11px}.stage{aspect-ratio:4/3}.head{margin-bottom:15px}.brand{font-size:22px}}
+  </style>
+</head>
+<body>
+  <main class="wrap">
+    <header class="head"><div><div class="brand">SEMILIR</div><div class="sub">SMART BRT DETECTION SYSTEM</div></div><div class="pill">LIVE VISION AI</div></header>
+    <section class="panel">
+      <div class="stage" id="stage">
+        <div class="empty" id="empty"><b>Camera belum aktif</b>Tekan “Mulai Kamera” untuk mendeteksi kendaraan.</div>
+        <video id="video" playsinline muted></video>
+        <canvas id="overlay"></canvas>
+      </div>
+      <div class="actions">
+        <button class="btn" id="start">Mulai Kamera</button>
+        <button class="btn secondary" id="stop" disabled>Stop</button>
+        <button class="btn secondary" id="switch" disabled>Ganti Kamera</button>
+      </div>
+      <div class="status" id="status">Siap. Website membutuhkan izin kamera dan koneksi internet.</div>
+      <div class="grid">
+        <div class="result"><small>HASIL DETEKSI TERAKHIR</small><strong id="label">—</strong><div class="meta" id="confidence">Belum ada deteksi</div></div>
+        <div class="result"><small>STATUS SEMILIR</small><strong id="decision">STANDBY</strong><div class="meta" id="count">0 objek terdeteksi</div></div>
+      </div>
+      <p class="foot">Hasil AI merupakan bantuan identifikasi visual, bukan satu-satunya dasar membuka gate. Gunakan verifikasi tambahan dan mekanisme fail-safe sebelum integrasi ke perangkat kontrol fisik.</p>
+    </section>
+  </main>
+<script>
+const video=document.getElementById('video'), canvas=document.getElementById('overlay'), ctx=canvas.getContext('2d');
+const startBtn=document.getElementById('start'), stopBtn=document.getElementById('stop'), switchBtn=document.getElementById('switch');
+const statusEl=document.getElementById('status'), empty=document.getElementById('empty');
+let stream=null, facing='environment', running=false, busy=false, timer=null;
+const setStatus=t=>statusEl.textContent=t;
+function findPredictions(obj, depth=0){
+  if(!obj||depth>7)return [];
+  if(Array.isArray(obj)){
+    if(obj.length&&obj.some(x=>x&&typeof x==='object'&&('class'in x||'class_name'in x)&&('x'in x||'bbox'in x)))return obj;
+    for(const v of obj){const p=findPredictions(v,depth+1);if(p.length)return p;} return [];
+  }
+  if(typeof obj==='object'){
+    if(Array.isArray(obj.predictions))return obj.predictions;
+    for(const v of Object.values(obj)){const p=findPredictions(v,depth+1);if(p.length)return p;}
+  }
+  return [];
+}
+function draw(preds, imageInfo){
+  const w=video.videoWidth,h=video.videoHeight; if(!w||!h)return;
+  if(canvas.width!==w||canvas.height!==h){canvas.width=w;canvas.height=h;}
+  ctx.clearRect(0,0,w,h);
+  let latest=null;
+  for(const p of preds){
+    const cls=String(p.class||p.class_name||p.label||'Unknown');
+    const conf=Number(p.confidence??p.score??0);
+    // Roboflow object-detection coordinates are center x/y plus width/height.
+    const x=Number(p.x??p.bbox?.x), y=Number(p.y??p.bbox?.y), bw=Number(p.width??p.bbox?.width), bh=Number(p.height??p.bbox?.height);
+    if(![x,y,bw,bh].every(Number.isFinite))continue;
+    const sx=w/(Number(imageInfo?.width)||w), sy=h/(Number(imageInfo?.height)||h);
+    const left=(x-bw/2)*sx, top=(y-bh/2)*sy, boxW=bw*sx, boxH=bh*sy;
+    const isBrt=cls.toLowerCase().replace(/[^a-z]/g,'').includes('brt');
+    const color=isBrt?'#26d07c':'#ff5d68';
+    ctx.strokeStyle=color;ctx.lineWidth=Math.max(3,w/400);ctx.strokeRect(left,top,boxW,boxH);
+    const text=`${cls.toUpperCase()} ${(conf*100).toFixed(1)}%`;
+    ctx.font=`bold ${Math.max(13,w/55)}px system-ui`;const tw=ctx.measureText(text).width;
+    ctx.fillStyle=color;ctx.fillRect(left,Math.max(0,top-27),tw+14,27);ctx.fillStyle='#06111d';ctx.fillText(text,left+7,Math.max(18,top-8));
+    if(!latest||conf>latest.confidence)latest={cls,confidence:conf,isBrt};
+  }
+  document.getElementById('count').textContent=`${preds.length} objek terdeteksi`;
+  if(latest){
+    const label=document.getElementById('label');label.textContent=latest.cls.toUpperCase();label.className=latest.isBrt?'green':'red';
+    document.getElementById('confidence').textContent=`Confidence ${(latest.confidence*100).toFixed(1)}%`;
+    const d=document.getElementById('decision');d.textContent=latest.isBrt?'AUTHORIZED':'UNAUTHORIZED';d.className=latest.isBrt?'green':'red';
+  } else {document.getElementById('label').textContent='Tidak terdeteksi';document.getElementById('label').className='';document.getElementById('confidence').textContent='Arahkan kamera ke kendaraan';document.getElementById('decision').textContent='STANDBY';document.getElementById('decision').className='';}
+}
+async function inferFrame(){
+  if(!running||busy||!video.videoWidth)return; busy=true;
+  try{
+    const c=document.createElement('canvas');const scale=Math.min(1,960/video.videoWidth);c.width=Math.round(video.videoWidth*scale);c.height=Math.round(video.videoHeight*scale);
+    c.getContext('2d').drawImage(video,0,0,c.width,c.height);
+    const image=c.toDataURL('image/jpeg',0.72);
+    setStatus('Menganalisis frame melalui Roboflow Cloud…');
+    const r=await fetch('/api/detect',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({image})});
+    const data=await r.json();if(!r.ok)throw new Error(data.error||`Inference gagal (${r.status})`);
+    const preds=findPredictions(data);draw(preds,data.image||data?.outputs?.[0]?.image);
+    setStatus(`Terakhir diperbarui ${new Date().toLocaleTimeString('id-ID')} · Cloud inference`);
+  }catch(e){setStatus(`Error: ${e.message}`);}
+  finally{busy=false;if(running)timer=setTimeout(inferFrame,900);}
+}
+async function startCamera(){
+  try{
+    stopCamera();setStatus('Meminta akses kamera…');
+    stream=await navigator.mediaDevices.getUserMedia({audio:false,video:{facingMode:{ideal:facing},width:{ideal:1280},height:{ideal:720}}});
+    video.srcObject=stream;await video.play();video.style.display='block';empty.style.display='none';running=true;
+    startBtn.disabled=true;stopBtn.disabled=false;switchBtn.disabled=false;setStatus('Kamera aktif. Menghubungkan ke model SEMILIR…');inferFrame();
+  }catch(e){setStatus(`Kamera tidak dapat dibuka: ${e.message}. Pastikan menggunakan HTTPS dan izinkan akses kamera.`);}
+}
+function stopCamera(){running=false;clearTimeout(timer);if(stream)stream.getTracks().forEach(t=>t.stop());stream=null;video.srcObject=null;video.style.display='none';empty.style.display='block';ctx.clearRect(0,0,canvas.width,canvas.height);startBtn.disabled=false;stopBtn.disabled=true;switchBtn.disabled=true;document.getElementById('label').textContent='—';document.getElementById('label').className='';document.getElementById('confidence').textContent='Belum ada deteksi';document.getElementById('decision').textContent='STANDBY';document.getElementById('decision').className='';document.getElementById('count').textContent='0 objek terdeteksi';}
+startBtn.addEventListener('click',startCamera);stopBtn.addEventListener('click',()=>{stopCamera();setStatus('Kamera dihentikan.');});switchBtn.addEventListener('click',async()=>{facing=facing==='environment'?'user':'environment';await startCamera();});
+if(!navigator.mediaDevices?.getUserMedia){startBtn.disabled=true;setStatus('Browser tidak mendukung kamera. Buka melalui Chrome atau Safari versi terbaru.');}
+</script>
+</body>
+</html>
